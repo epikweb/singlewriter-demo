@@ -39,4 +39,5 @@ jobs:
       - name: Run app
         run: node app.js
         env:
+          NODE_ENV: test
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
