@@ -275,9 +275,27 @@ const start = async () => {
     handler(req, res, id)
   })
 
-  server.listen(8080, () => {
-    console.log("🧠 Event-sourced API server running at http://localhost:8080")
-  })
+  // ---------- Unit Test Mode (if NODE_ENV=test) ----------
+  if (process.env.NODE_ENV === 'test') {
+    console.log("🧪 Running functional core tests...")
+
+    const plan = "test-plan"
+    const createdBy = "ci@test"
+    core.produce({ type: 'Subscription.Create', data: { plan, createdBy } })
+    const tx = core.commit()
+
+    const assert = (cond, msg) => { if (!cond) throw new Error("❌ " + msg); else console.log("✅", msg) }
+    assert(tx.length === 1, "Exactly one Subscription.Created event emitted")
+    assert(tx[0].data.plan === plan, "Plan set correctly in event")
+    assert(core.query(["Subscription.List", tx[0].data.subscriptionId]).plan === plan, "Plan matches in view")
+
+    console.log("🧪 All tests passed.")
+    process.exit(0)
+  } else {
+    server.listen(8080, () => {
+      console.log("🧠 Event-sourced API server running at http://localhost:8080")
+    })
+  }
 }
 
 start()
