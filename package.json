@@ -1,0 +1,13 @@
+{
+  "name": "singlewriter-demo",
+  "version": "1.0.0",
+  "description": "Event-sourced API server with PostgreSQL LSS and functional core",
+  "main": "app.js",
+  "type": "module",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.1"
+  }
+}
