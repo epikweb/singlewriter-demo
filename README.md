@@ -52,7 +52,7 @@ NODE_ENV=test node app.js
 
 This system is modeled according to this event model diagram:
 
-![Event Model](./docs/EventModelling_-_Miro.png)
+![Event Model](EventModel.png)
 
 ## 🐘 Database
 
