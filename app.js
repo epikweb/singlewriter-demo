@@ -321,7 +321,6 @@ let withSingleWriterMutex = (() => {
           }
         }
       })()
-      busy = false
     }
   }
 })()
