@@ -180,36 +180,51 @@ const core = (() => {
   const FunctionalCore = (StateChange, StateView, StateMachine) => {
     let stateChange = {}
     let stateView = {}
+    let stateMachine = {}
     let currentTransaction = []
     StateChange.forEach(sc => stateChange[sc.viewId] = structuredClone(sc.initialState))
     StateView.forEach(sv => stateView[sv.viewId] = structuredClone(sv.initialState))
+
 
     const reduce = event => {
       StateView.forEach(sv => {
         const f = sv.reduce[event.type]
         if (f) f(stateView[sv.viewId], event.data)
+        // log the views that just changed, chatgpt made a mistake and tried to use the events to trigger the processors
+        stateMachine[sv.viewId] = 1;
       })
       StateChange.forEach(sc => {
         const f = sc.reduce?.[event.type]
         if (f) f(stateChange[sc.viewId], event)
       })
+      return stateMachine
     }
 
+    // spin the state machines with a consistent snapshot of all the views that just changed (can keep triggering more and more stuff!)
+    const trigger = () => {
+      let snapshot = structuredClone(stateMachine)
+      stateMachine = {}
+
+      StateMachine.forEach(machine => {
+        if (snapshot[machine.viewId]) {
+          machine.trigger({ query, produce })
+        }
+      })
+    }
     const produce = command => {
       const change = StateChange.find(x => x.viewId === command.type)
       const events = change.map(command.data, stateChange[command.type])
       currentTransaction.push(...events)
       events.forEach(reduce)
-      StateMachine.forEach(machine => {
-        if (events.some(e => machine.viewId === e.type || machine.viewId === e.data?.viewId)) {
-          machine.trigger({ query, produce })
-        }
-      })
+      trigger()
       return events
     }
 
     const consume = event => {
-      reduce(event) // processors don’t run during replay
+      // always log the external state input for traceability before any state is changed!
+      currentTransaction.push(event)
+      reduce(event)
+      trigger()
     }
 
     const query = path => (function recurse(state, path) {
