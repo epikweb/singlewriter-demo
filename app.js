@@ -366,21 +366,21 @@ const server = http.createServer(async (req, res) => {
 
 // ---------- ExternalStateOutput email sender ----------
 if (process.env.SENDGRID_API_KEY) {
-  // something catastrophic happened with the network pipe
-  let unknown = err => {
-    withSingleWriterMutex((action) => {
-      core.produce({
-        type: 'Email.Failed',
-        data: {
-          notificationId: action.notificationId,
-          actionResult: 'UnknownError',
-          message: err.message
-        }
-      })
-    })(() => {})
-  }
   setInterval(() => {
     core.query(['Emails.To.Send']).map(action => {
+      // something catastrophic happened with the network pipe
+      let unknown = err => {
+        withSingleWriterMutex(() => {
+          core.produce({
+            type: 'Email.Failed',
+            data: {
+              notificationId: action.notificationId,
+              actionResult: 'UnknownError',
+              message: err.message
+            }
+          })
+        })(() => {})
+      }
       // action at a distance, its a black box/global singleton, we have no idea whats going on in there
       let req = http.request({
         host: 'api.sendgrid.com',
