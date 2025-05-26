@@ -163,7 +163,7 @@ const core = (() => {
       reduce: {
         'Member.AssignedToSubscription': (state, data) => {
           let notificationId = state.nextId++;
-          state.push({
+          state.list.push({
             text: `Hey ${data.memberId}, you were assigned to subscription ${data.subscriptionId}`,
             notificationId,
             attempt: 0
@@ -171,7 +171,7 @@ const core = (() => {
         },
         'Member.AssignmentStarted': (state, data) => {
           let notificationId = state.nextId++;
-          state.push({
+          state.list.push({
             text: `Your assignment has been started ${data.memberId}`,
             notificationId,
             attempt: 0
