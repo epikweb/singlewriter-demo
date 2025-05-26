@@ -153,6 +153,37 @@ const core = (() => {
           state[data.subscriptionId].pending.delete(data.memberId)
         }
       }
+    },
+    {
+      viewId: 'Emails.To.Send',
+      initialState: {
+        nextId: 1,
+        list: []
+      },
+      reduce: {
+        'Member.AssignedToSubscription': (state, data) => {
+          let notificationId = state.nextId++;
+          state.push({
+            text: `Hey ${data.memberId}, you were assigned to subscription ${data.subscriptionId}`,
+            notificationId,
+            attempt: 0
+          })
+        },
+        'Member.AssignmentStarted': (state, data) => {
+          let notificationId = state.nextId++;
+          state.push({
+            text: `Your assignment has been started ${data.memberId}`,
+            notificationId,
+            attempt: 0
+          })
+        },
+        'Email.Sent': (state, data) => {
+          state.list = state.list.filter(x => x.notificationId !== data.notificationId)
+        },
+        'Email.Failed': (state, data) => {
+          state.list.find(x => x.notificationId === data.notificationId).attempt++
+        }
+      }
     }
   ]
 
@@ -251,6 +282,50 @@ const core = (() => {
 const history = await lss.sharedReader.physicalRead()
 history.forEach(core.reduce)
 
+// ---------- Txn helper for atomicity between fn core and lss (further make single writer mutex explicit) ----------
+let withSingleWriterMutex = (() => {
+  let queue = []
+  let busy = false;
+  return criticalSection => continuation => {
+    queue.push([criticalSection, continuation]);
+    if (busy === false) {
+      busy = true;
+      (function update() {
+        if (queue.length === 0) {
+          busy = false
+        } else {
+          let [criticalSection, continuation] = queue.shift();
+          try {
+            // protected access to currentOrderId and we can produce commands/return state inside this function
+            // this is equivalent to serializable isolation level in RDBMS without all the nasty multi thread races
+            let returnValue = criticalSection()
+            let tx = core.commit();
+            lss.singleWriter.physicalAppend(tx)
+              .then(() => {
+                continuation({
+                  tx,
+                  returnValue
+                })
+                update()
+              })
+              .catch(err => {
+              // crash the process and go to recovery when we come up, low level IO error in the lss
+              console.error(err)
+              process.exit(1)
+            });
+          } catch (err) {
+            // crash the process and go to recovery when we come up, reduce threw exception
+            // we can optionally support rollback on the state if we use copy instead of in place mutations
+            console.error(err)
+            process.exit(1)
+          }
+        }
+      })()
+      busy = false
+    }
+  }
+})()
+
 // ---------- HTTP API ----------
 const routes = {
   POST: {
@@ -259,11 +334,12 @@ const routes = {
       req.on('data', chunk => body += chunk)
       req.on('end', async () => {
         const { plan, createdBy } = JSON.parse(body)
-        core.produce({ type: 'Subscription.Create', data: { plan, createdBy } })
-        const tx = core.commit()
-        await lss.singleWriter.physicalAppend(tx.map(e => ({ ...e, partitionId: `subscription-${e.data.subscriptionId}` })))
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, subscriptionId: tx[0].data.subscriptionId }))
+        withSingleWriterMutex(() => {
+          core.produce({ type: 'Subscription.Create', data: { plan, createdBy } })
+        })(({ txn }) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, subscriptionId: txn[0].data.subscriptionId }))
+        })
       })
     }
   },
@@ -288,6 +364,65 @@ const server = http.createServer(async (req, res) => {
 
   handler(req, res, id)
 })
+
+// ---------- ExternalStateOutput email sender ----------
+if (process.env.SENDGRID_API_KEY) {
+  // something catastrophic happened with the network pipe
+  let unknown = err => {
+    withSingleWriterMutex((action) => {
+      core.produce({
+        type: 'Email.Failed',
+        data: {
+          notificationId: action.notificationId,
+          actionResult: 'UnknownError',
+          message: err.message
+        }
+      })
+    })(() => {})
+  }
+  setInterval(() => {
+    core.query(['Emails.To.Send']).map(action => {
+      // action at a distance, its a black box/global singleton, we have no idea whats going on in there
+      let req = http.request({
+        host: 'api.sendgrid.com',
+        path: '/my_send_email_sendpoint',
+        headers: {
+          Authentication: `Bearer ${process.env.SENDGRID_API_KEY}`,
+        }
+      }, res => {
+        let receiveBuffer = []
+        res.on('error', unknown)
+        res.on('data', chunk => receiveBuffer.push(chunk))
+        res.on('end', () => {
+          const actionResult = JSON.parse(Buffer.concat(receiveBuffer).toString())
+          withSingleWriterMutex(() => {
+            if (res.statusCode === 200) {
+              core.produce({
+                type: 'Email.Succeeded',
+                data: {
+                  notificationId: action.notificationId,
+                  actionResult
+                }
+              })
+            } else {
+              // its something we can fix
+              core.produce({
+                type: 'Email.Failed',
+                data: {
+                  notificationId: action.notificationId,
+                  actionResult
+                }
+              })
+            }
+          })(() => {})
+        })
+      });
+      req.on('error', unknown)
+      req.write(Buffer.from(JSON.stringify(action)))
+      req.end()
+    })
+  }, 1000)
+}
 
 // ---------- Unit Test Mode (if NODE_ENV=test) ----------
 if (process.env.NODE_ENV === 'test') {
