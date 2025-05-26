@@ -371,7 +371,7 @@ if (process.env.SENDGRID_API_KEY) {
       // something catastrophic happened with the network pipe
       let unknown = err => {
         withSingleWriterMutex(() => {
-          core.produce({
+          core.consume({
             type: 'Email.Failed',
             data: {
               notificationId: action.notificationId,
@@ -396,7 +396,7 @@ if (process.env.SENDGRID_API_KEY) {
           const actionResult = JSON.parse(Buffer.concat(receiveBuffer).toString())
           withSingleWriterMutex(() => {
             if (res.statusCode === 200) {
-              core.produce({
+              core.consume({
                 type: 'Email.Succeeded',
                 data: {
                   notificationId: action.notificationId,
@@ -405,7 +405,7 @@ if (process.env.SENDGRID_API_KEY) {
               })
             } else {
               // its something we can fix
-              core.produce({
+              core.consume({
                 type: 'Email.Failed',
                 data: {
                   notificationId: action.notificationId,
