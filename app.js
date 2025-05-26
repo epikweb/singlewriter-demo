@@ -27,14 +27,14 @@ const lss = await (async () => {
             VALUES (0, 'system', 'LSS.Initialized', '{}', '{}');
         `)
       }
-      let currentOrderId = 0
+      const { rows: maxRows } = await writeDb.query(`SELECT COALESCE(MAX(lss_order_id), 0) AS max FROM lss`)
+      let currentOrderId = maxRows[0].max
       return {
         physicalAppend: async (events) => {
           const appendTime = new Date().toISOString()
           const values = events.map(({ partitionId, type, data, metadata }) => {
             metadata.appendTime = appendTime
-            currentOrderId++
-            return `(${currentOrderId}, '${partitionId}', '${type}', $$${JSON.stringify(data).replace(/\$/g, '$')}$$, $$${JSON.stringify(metadata)}$$)`
+            return `(${++currentOrderId}, '${partitionId}', '${type}', $$${JSON.stringify(data).replace(/\$/g, '$')}$$, $$${JSON.stringify(metadata)}$$)`
           }).join(',')
           await writeDb.query(`
               INSERT INTO lss (lss_order_id, lss_partition_id, lss_type, lss_data, lss_metadata)
