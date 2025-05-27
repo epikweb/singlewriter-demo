@@ -7,6 +7,7 @@ A fully integrated event-sourced API server using a log-structured store (LSS), 
 
 ## 🧬 Event Model
 This system is modeled according to this event model diagram:
+![Event Model](EventModel.png)
 
 
 ## 🚀 Architecture Overview
