@@ -85,19 +85,26 @@ const core = (() => {
       viewId: 'Subscription.Create',
       initialState: { nextId: 1 },
       reduce: {
-        'Subscription.Created': (state, event) => {
-          state.nextId = Math.max(state.nextId, parseInt(event.data.subscriptionId.split('-')[1]) + 1)
-        }
+        'Subscription.Created': (state, event) => ({
+          ...state,
+          nextId: Math.max(
+            state.nextId,
+            parseInt(event.data.subscriptionId.split('-')[1]) + 1
+          )
+        })
       },
-      map: (command, state) => [{
-        type: 'Subscription.Created',
-        data: {
-          subscriptionId: `sub-${state.nextId++}`,
-          plan: command.plan,
-          createdBy: command.createdBy
-        },
-        metadata: {}
-      }]
+      map: (command, state) => {
+        const nextId = state.nextId;
+        return [{
+          type: 'Subscription.Created',
+          data: {
+            subscriptionId: `sub-${nextId}`,
+            plan: command.plan,
+            createdBy: command.createdBy
+          },
+          metadata: {}
+        }];
+      }
     },
     {
       viewId: 'Subscription.Assign.Members',
@@ -112,24 +119,31 @@ const core = (() => {
         metadata: {}
       }]
     }
-  ]
-
+  ];
   const StateView = [
     {
       viewId: 'Subscription.List',
       initialState: {},
       reduce: {
-        'Subscription.Created': (state, data) => {
-          state[data.subscriptionId] = {
+        'Subscription.Created': (state, data) => ({
+          ...state,
+          [data.subscriptionId]: {
             plan: data.plan,
             createdBy: data.createdBy,
             members: []
           }
-        },
+        }),
         'Member.AssignedToSubscription': (state, data) => {
-          if (state[data.subscriptionId]) {
-            state[data.subscriptionId].members.push(data.memberId)
-          }
+          const sub = state[data.subscriptionId];
+          if (!sub) return state;
+
+          return {
+            ...state,
+            [data.subscriptionId]: {
+              ...sub,
+              members: [...sub.members, data.memberId]
+            }
+          };
         }
       }
     },
@@ -137,20 +151,47 @@ const core = (() => {
       viewId: 'Assignment.Tracker',
       initialState: {},
       reduce: {
-        'Members.AssignmentStarted': (state, data) => {
-          state[data.subscriptionId] = {
+        'Members.AssignmentStarted': (state, data) => ({
+          ...state,
+          [data.subscriptionId]: {
             pending: new Set(data.members),
             completed: [],
             failed: []
           }
-        },
+        }),
         'Member.AssignedToSubscription': (state, data) => {
-          state[data.subscriptionId].completed.push(data.memberId)
-          state[data.subscriptionId].pending.delete(data.memberId)
+          const tracker = state[data.subscriptionId];
+          if (!tracker) return state;
+
+          const pending = new Set(tracker.pending);
+          pending.delete(data.memberId);
+
+          return {
+            ...state,
+            [data.subscriptionId]: {
+              ...tracker,
+              completed: [...tracker.completed, data.memberId],
+              pending,
+              failed: tracker.failed
+            }
+          };
         },
         'Failed.ToAssignMemberToSubscription': (state, data) => {
-          state[data.subscriptionId].failed.push(data.memberId)
-          state[data.subscriptionId].pending.delete(data.memberId)
+          const tracker = state[data.subscriptionId];
+          if (!tracker) return state;
+
+          const pending = new Set(tracker.pending);
+          pending.delete(data.memberId);
+
+          return {
+            ...state,
+            [data.subscriptionId]: {
+              ...tracker,
+              failed: [...tracker.failed, data.memberId],
+              pending,
+              completed: tracker.completed
+            }
+          };
         }
       }
     },
@@ -162,30 +203,51 @@ const core = (() => {
       },
       reduce: {
         'Member.AssignedToSubscription': (state, data) => {
-          let notificationId = state.nextId++;
-          state.push({
-            text: `Hey ${data.memberId}, you were assigned to subscription ${data.subscriptionId}`,
-            notificationId,
-            attempt: 0
-          })
+          const notificationId = state.nextId;
+          return {
+            nextId: notificationId + 1,
+            list: [
+              ...state.list,
+              {
+                text: `Hey ${data.memberId}, you were assigned to subscription ${data.subscriptionId}`,
+                notificationId,
+                attempt: 0
+              }
+            ]
+          };
         },
         'Member.AssignmentStarted': (state, data) => {
-          let notificationId = state.nextId++;
-          state.push({
-            text: `Your assignment has been started ${data.memberId}`,
-            notificationId,
-            attempt: 0
+          const notificationId = state.nextId;
+          return {
+            nextId: notificationId + 1,
+            list: [
+              ...state.list,
+              {
+                text: `Your assignment has been started ${data.memberId}`,
+                notificationId,
+                attempt: 0
+              }
+            ]
+          };
+        },
+        'Email.Succeeded': (state, data) => ({
+          ...state,
+          list: state.list.filter(x => x.notificationId !== data.notificationId)
+        }),
+        'Email.Failed': (state, data) => ({
+          ...state,
+          list: state.list.flatMap(x => {
+            if (x.notificationId !== data.notificationId) return x;
+            const newAttempt = x.attempt + 1;
+            const maxRetries = 10;
+            return newAttempt < maxRetries
+              ? [{ ...x, attempt: newAttempt }]
+              : []; // Drop the message if it hit max retries (ChatGPT loves this for some reason)
           })
-        },
-        'Email.Sent': (state, data) => {
-          state.list = state.list.filter(x => x.notificationId !== data.notificationId)
-        },
-        'Email.Failed': (state, data) => {
-          state.list.find(x => x.notificationId === data.notificationId).attempt++
-        }
+        })
       }
     }
-  ]
+  ];
 
   const StateMachine = [
     {
@@ -213,6 +275,10 @@ const core = (() => {
     let stateView = {}
     let stateMachine = {}
     let currentTransaction = []
+    let currentState = {
+      stateChange: {},
+      stateView: {}
+    }
     StateChange.forEach(sc => stateChange[sc.viewId] = structuredClone(sc.initialState))
     StateView.forEach(sv => stateView[sv.viewId] = structuredClone(sv.initialState))
 
@@ -220,15 +286,27 @@ const core = (() => {
     const reduce = event => {
       StateView.forEach(sv => {
         const f = sv.reduce[event.type]
-        if (f) f(stateView[sv.viewId], event.data)
+        if (f) {
+          // now lets take a copy of the first time we see this viewId so if the txn rolls back we can revert
+          if (currentState.stateView[sv.viewId] === undefined) {
+            currentState.stateView[sv.viewId] = structuredClone(stateView[sv.viewId])
+          }
+          stateView[sv.viewId] = f(stateView[sv.viewId], event.data)
+        }
+
         // log the views that just changed, chatgpt made a mistake and tried to use the events to trigger the processors
         stateMachine[sv.viewId] = 1;
       })
       StateChange.forEach(sc => {
-        const f = sc.reduce?.[event.type]
-        if (f) f(stateChange[sc.viewId], event)
+        const f = sc.reduce[event.type]
+        if (f) {
+          // now lets take a copy of the first time we see this viewId so if the txn rolls back we can revert
+          if (currentState.stateChange[sc.viewId] === undefined) {
+            currentState.stateChange[sc.viewId] = structuredClone(stateChange[sc.viewId])
+          }
+          stateChange[sc.viewId] = f(stateChange[sc.viewId], event)
+        }
       })
-      return stateMachine
     }
 
     // spin the state machines with a consistent snapshot of all the views that just changed (can keep triggering more and more stuff!)
@@ -267,15 +345,23 @@ const core = (() => {
     const commit = () => {
       const tx = currentTransaction
       currentTransaction = []
+      currentState = { stateChange: {}, stateView: {} };
       return tx
     }
 
-    return { produce, consume, query, reduce, commit }
+    const rollback = () => {
+      for (let viewId in currentState.stateChange) {
+        stateChange[viewId] = currentState.stateChange[viewId]
+      }
+      for (let viewId in currentState.stateView) {
+        stateView[viewId] = currentState.stateView[viewId]
+      }
+      currentTransaction = [];
+      currentState = { stateChange: {}, stateView: {} };
+    }
+    return { produce, consume, query, reduce, commit, rollback }
   }
-
   return FunctionalCore(StateChange, StateView, StateMachine)
-
-  return core
 })()
 
 // ---------- Recovery ----------
@@ -306,18 +392,20 @@ let withSingleWriterMutex = (() => {
                   tx,
                   returnValue
                 })
+                externalStateOutput.map(trigger => {
+                  trigger()
+                })
                 update()
               })
               .catch(err => {
-              // crash the process and go to recovery when we come up, low level IO error in the lss
-              console.error(err)
-              process.exit(1)
-            });
+                // crash the process and go to recovery when we come up, low level IO error in the lss
+                console.error(err)
+                process.exit(1)
+              });
           } catch (err) {
-            // crash the process and go to recovery when we come up, reduce threw exception
-            // we can optionally support rollback on the state if we use copy instead of in place mutations
-            console.error(err)
-            process.exit(1)
+            // we have the dirty object set, lets travel back in time
+            console.error('rollback time', err)
+            core.rollback();
           }
         }
       })()
@@ -364,64 +452,74 @@ const server = http.createServer(async (req, res) => {
   handler(req, res, id)
 })
 
-// ---------- ExternalStateOutput email sender ----------
-if (process.env.SENDGRID_API_KEY) {
-  setInterval(() => {
-    core.query(['Emails.To.Send']).map(action => {
-      // something catastrophic happened with the network pipe
-      let unknown = err => {
-        withSingleWriterMutex(() => {
-          core.consume({
-            type: 'Email.Failed',
-            data: {
-              notificationId: action.notificationId,
-              actionResult: 'UnknownError',
-              message: err.message
-            }
-          })
-        })(() => {})
-      }
-      // action at a distance, its a black box/global singleton, we have no idea whats going on in there
-      let req = http.request({
-        host: 'api.sendgrid.com',
-        path: '/my_send_email_sendpoint',
-        headers: {
-          Authentication: `Bearer ${process.env.SENDGRID_API_KEY}`,
-        }
-      }, res => {
-        let receiveBuffer = []
-        res.on('error', unknown)
-        res.on('data', chunk => receiveBuffer.push(chunk))
-        res.on('end', () => {
-          const actionResult = JSON.parse(Buffer.concat(receiveBuffer).toString())
-          withSingleWriterMutex(() => {
-            if (res.statusCode === 200) {
-              core.consume({
-                type: 'Email.Succeeded',
-                data: {
-                  notificationId: action.notificationId,
-                  actionResult
-                }
-              })
-            } else {
-              // its something we can fix
+// ---------- ExternalStateOutput - asynchronous triggers to external systems done after the txn is durable ----------
+
+
+let externalStateOutput = [
+// ----------  email sender ----------
+  (() => {
+    if (process.env.SENDGRID_API_KEY) {
+      return () => {
+        core.query(['Emails.To.Send']).map(action => {
+          // something catastrophic happened with the network pipe
+          let unknown = err => {
+            withSingleWriterMutex(() => {
               core.consume({
                 type: 'Email.Failed',
                 data: {
                   notificationId: action.notificationId,
-                  actionResult
+                  actionResult: 'UnknownError',
+                  message: err.message
                 }
               })
+            })(() => {})
+          }
+          // action at a distance, its a black box/global singleton, we have no idea whats going on in there
+          let req = http.request({
+            host: 'api.sendgrid.com',
+            path: '/my_send_email_sendpoint',
+            headers: {
+              Authorization : `Bearer ${process.env.SENDGRID_API_KEY}`,
             }
-          })(() => {})
+          }, res => {
+            let receiveBuffer = []
+            res.on('error', unknown)
+            res.on('data', chunk => receiveBuffer.push(chunk))
+            res.on('end', () => {
+              const actionResult = JSON.parse(Buffer.concat(receiveBuffer).toString())
+              withSingleWriterMutex(() => {
+                if (res.statusCode === 200) {
+                  core.consume({
+                    type: 'Email.Succeeded',
+                    data: {
+                      notificationId: action.notificationId,
+                      actionResult
+                    }
+                  })
+                } else {
+                  // its something we can fix
+                  core.consume({
+                    type: 'Email.Failed',
+                    data: {
+                      notificationId: action.notificationId,
+                      actionResult
+                    }
+                  })
+                }
+              })(() => {})
+            })
+          });
+          req.on('error', unknown)
+          req.write(Buffer.from(JSON.stringify(action)))
+          req.end()
         })
-      });
-      req.on('error', unknown)
-      req.write(Buffer.from(JSON.stringify(action)))
-      req.end()
-    })
-  }, 1000)
-}
+      }
+    }
+    return () => {
+
+    }
+  })()
+]
 
 // ---------- Unit Test Mode (if NODE_ENV=test) ----------
 if (process.env.NODE_ENV === 'test') {
