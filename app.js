@@ -406,6 +406,9 @@ let withSingleWriterMutex = (() => {
             // we have the dirty object set, lets travel back in time
             console.error('rollback time', err)
             core.rollback();
+
+            // next command
+            update()
           }
         }
       })()
